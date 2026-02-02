@@ -1,6 +1,8 @@
 name: Veracode Software Composition Analysis
 
-on: workflow_dispatch
+on:
+  schedule:
+    - cron: '0 4 * * 3'
 
 jobs:
   veracode_sca_task:
