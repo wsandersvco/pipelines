@@ -46,12 +46,12 @@ jobs:
           working_path=$(pwd)
           echo "working_dir=$working_path" >> "$GITHUB_OUTPUT"
 
-          cd veracode-helper/helper/cli
+          cd ${{ github.workspace}}/veracode-helper/helper/cli
           cliFile=$(ls -1 *.tar.gz | head -n 1)
           cliFileName=$(echo "$cliFile" | cut -c 1-$((${#cliFile}-7)))
           tar -zxvf $cliFile
           cd $cliFileName
-          export PATH="veracode-helper/helper/cli/$cliFileName:$PATH"
+          export PATH="${{ github.workspace }}/veracode-helper/helper/cli/$cliFileName:$PATH"
           cd $working_path
 
           veracode package --source . --output "${{ github.workspace }}/${{ env.ARTIFACT_PATH }}" --trust --verbose
