@@ -1,0 +1,61 @@
+name: Veracode Static Analysis - Get Policy Flaws And Import SARIF
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      application_name:
+        type: string
+        required: true
+
+env:
+  APPLICATION_NAME: ${{ inputs.application_name || 'PLACEHOLDER_APP_NAME' }}
+
+jobs:
+  fetch_policy_flaws_task:
+    if: always()
+    runs-on: ubuntu-latest
+    name: Veracode Static Analysis - Get Policy Flaws
+    container: veracode/api-signing:latest
+
+    steps:
+      - name: Fetch flaws
+        run: |
+          cd /tmp
+          export VERACODE_API_KEY_ID=${{ secrets.VERACODE_API_ID }}
+          export VERACODE_API_KEY_SECRET=${{ secrets.VERACODE_API_KEY }}
+          guid=$(http --auth-type veracode_hmac GET "https://api.veracode.com/appsec/v1/applications?name=${{ env.APPLICATION_NAME }}" | jq -r '._embedded.applications[0].guid') 
+          echo GUID: ${guid}
+          total_flaws=$(http --auth-type veracode_hmac GET "https://api.veracode.com/appsec/v2/applications/${guid}/findings?scan_type=STATIC&violates_policy=True" | jq -r '.page.total_elements')
+          echo TOTAL_FLAWS: ${total_flaws}
+          http --auth-type veracode_hmac GET "https://api.veracode.com/appsec/v2/applications/${guid}/findings?scan_type=STATIC&violates_policy=True&size=${total_flaws}" > policy_flaws.json
+
+      - name: Save results
+        uses: actions/upload-artifact@v4
+        with:
+          name: policy-flaws
+          path: /tmp/policy_flaws.json
+        continue-on-error: true
+
+  results_to_sarif:
+    needs: fetch_policy_flaws_task
+    runs-on: ubuntu-latest
+    name: Import policy results to SARIF
+
+    steps:
+      - name: Get scan results
+        uses: actions/download-artifact@v4
+        with:
+          name: policy-flaws
+          path: /tmp
+
+      - name: Convert pipeline scan output to SARIF format
+        if: always()
+        # create code scanning alerts
+        uses: veracode/veracode-pipeline-scan-results-to-sarif@v2.0.4
+        with:
+          scan-type: policy
+          results-json: '/tmp/policy_flaws.json'
+          output-results-sarif: veracode-results.sarif
+          commitSHA: ${{ github.sha }}
+          ref: ${{ github.ref }}
