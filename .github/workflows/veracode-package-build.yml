@@ -17,7 +17,7 @@ on:
 
 jobs:
   build-prepare:
-    runs-on: ${{ fromJSON(inputs.build_runs_on) || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.build_runs_on || 'ubuntu-latest' }}
     name: Build preparation
     outputs:
       runner_os: ${{ steps.identify_runner_os.outputs.runner_os }}
@@ -29,7 +29,7 @@ jobs:
 
   build-linux:
     needs: build-prepare
-    runs-on: ${{ fromJSON(inputs.build_runs_on) || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.build_runs_on || 'ubuntu-latest' }}
     container:
       image: ${{ inputs.build_packager_image || 'veracode/scm-packaging:3.0.0' }}
     name: Build on Linux
@@ -103,7 +103,7 @@ jobs:
 
   build-windows:
     needs: build-prepare
-    runs-on: ${{ fromJSON(inputs.build_runs_on) }}
+    runs-on: ${{ inputs.build_runs_on }}
     name: Build on Windows
     if: contains(needs.build-prepare.outputs.runner_os, 'Windows')
     env:
