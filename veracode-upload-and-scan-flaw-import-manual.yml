@@ -1,0 +1,51 @@
+name: Veracode Static Analysis - Upload And Scan
+on: workflow_dispatch
+
+env:
+  ARTIFACT_NAME: veracode-artifact
+  ARTIFACT_PATH: veracode_artifact_directory
+
+jobs:
+  build:
+    name: Build
+    uses: ./.github/workflows/veracode-package-build.yml
+    secrets: inherit
+
+  policy_scan:
+    name: Veracode Static Analysis - Policy Scan
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_PATH }}
+
+      - name: Veracode Upload And Scan
+        uses: veracode/veracode-uploadandscan-action@0.2.11
+        with:
+          appname: "APPLICATION_NAME_PLACEHOLDER"          
+          createprofile: true
+          teams: "Default Team"
+          deleteincompletescan: 1
+          debug: false
+          filepath: "${{ env.ARTIFACT_PATH }}"
+          vid: "${{ secrets.VERACODE_API_ID }}"
+          vkey: "${{ secrets.VERACODE_API_KEY }}"
+          # createsandbox: 'true'
+          # sandboxname: 'SANDBOXNAME'
+          scantimeout: 60 # minutes waiting for scan to complete. used for breaking the build
+          # exclude: '*.js'
+          # include: '*.war'
+          criticality: "VeryHigh"
+          policy: 'Veracode Recommended Very High + SCA'
+
+  fetch_policy_flaws_task:
+    if: always()
+    needs: policy_scan
+    uses: ./.github/workflows/veracode-fetch-and-import-sarif-policy-flaws.yml
+    secrets: inherit
+    with:
+      application_name: APPLICATION_NAME_PLACEHOLDER
