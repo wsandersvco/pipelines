@@ -1,3 +1,21 @@
+# name: Build
+
+# on:
+#   workflow_dispatch:
+
+# jobs:
+#   build-linux:
+#     if: always()
+#     uses: wsandersvc/actions/.github/workflows/veracode-package-build.yml@main
+#     secrets: inherit
+#   build-windows:
+#     if: always()
+#     uses: wsandersvc/actions/.github/workflows/veracode-package-build.yml@main
+#     secrets: inherit
+#     with:
+#       build_runs_on: windows-latest
+
+
 name: Veracode Package & Build
 
 on:
