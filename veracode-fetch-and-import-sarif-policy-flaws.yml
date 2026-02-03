@@ -37,7 +37,6 @@ jobs:
         with:
           name: policy-flaws
           path: /tmp/policy_flaws.json
-        continue-on-error: true
 
   results_to_sarif:
     needs: fetch_policy_flaws_task
