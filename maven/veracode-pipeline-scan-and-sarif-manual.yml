@@ -65,6 +65,7 @@ jobs:
           fail_build: false
 
   results_to_sarif:
+    if: always()
     needs: pipeline_scan
     runs-on: ubuntu-latest
     name: Import Pipeline Results to SARIF
