@@ -70,3 +70,4 @@ jobs:
           name: ${{ env.ARTIFACT_NAME }}
           path: ${{ github.workspace}}/${{ env.ARTIFACT_PATH }}
           retention-days: 3
+          if-no-files-found: error
