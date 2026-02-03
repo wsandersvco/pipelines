@@ -1,4 +1,4 @@
-name: Veracode Pipeline Scan
+name: Veracode Pipeline Scan And SARIF Upload
 on: workflow_dispatch
 
 env:
