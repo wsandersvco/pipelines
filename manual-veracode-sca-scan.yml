@@ -10,14 +10,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Set up JDK
-        uses: actions/setup-java@v5
-        with:
-          java-version: "8"
-          distribution: "temurin"
-          cache: "maven"
-          settings-path: ${{ github.workspace }}
-
       - name: Run Veracode SCA
         id: veracode-sca
         env:
@@ -29,9 +21,3 @@ jobs:
           debug: true
           allow-dirty: true
           recursive: true
-
-      - name: Display scan URL
-        env:
-          SCAN_URL: ${{ toJson(steps.veracode-sca.outputs.scan-url) }}
-        run: |
-          echo "View detailed report at: $SCAN_URL"

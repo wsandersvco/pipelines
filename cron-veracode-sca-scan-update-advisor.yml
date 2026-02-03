@@ -1,4 +1,4 @@
-name: Veracode Software Composition Analysis
+name: Veracode Software Composition Analysis - Update Advisor
 
 on:
   schedule:
@@ -12,14 +12,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Set up JDK
-        uses: actions/setup-java@v5
-        with:
-          java-version: "8"
-          distribution: "temurin"
-          cache: "maven"
-          settings-path: ${{ github.workspace }}
-
       - name: Run Veracode SCA
         id: veracode-sca
         env:
@@ -27,13 +19,8 @@ jobs:
         uses: veracode/veracode-sca@v2.1.15
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          create-issues: false
+          create-issues: true
           debug: true
           allow-dirty: true
           recursive: true
-
-      - name: Display scan URL
-        env:
-          SCAN_URL: ${{ toJson(steps.veracode-sca.outputs.scan-url) }}
-        run: |
-          echo "View detailed report at: $SCAN_URL"
+          update_advisor: true
