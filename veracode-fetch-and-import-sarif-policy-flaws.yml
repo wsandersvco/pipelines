@@ -16,7 +16,9 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     name: Veracode Static Analysis - Get Policy Flaws
-    container: veracode/api-signing:latest
+    container: 
+      image: veracode/api-signing:latest
+      options: --user root
 
     steps:
       - name: Fetch flaws
