@@ -35,17 +35,6 @@ jobs:
         with:
           path: source-code
 
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.11.x'
-      
-      - name: Install pipenv & generate pipenv Pipfile
-        shell: bash
-        working-directory: source-code
-        run: |
-          python3 -m pip install pipenv && pipenv install -r requirements.txt
-
       - name: Package the application
         id: application_package_linux
         shell: bash
