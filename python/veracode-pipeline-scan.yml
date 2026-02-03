@@ -1,0 +1,100 @@
+name: Veracode Pipeline Scan
+on: workflow_dispatch
+
+env:
+  ARTIFACT_NAME: veracode-artifact
+  ARTIFACT_PATH: veracode_artifact_directory
+
+jobs:
+  build:
+    name: Build
+    uses: ./.github/workflows/veracode-package-build.yml
+    secrets: inherit
+
+  prepare_pipeline_scan:
+    runs-on: ubuntu-latest
+    name: Prepare Pipeline Scan
+    needs: build
+    outputs:
+      matrix_files: ${{ steps.get-files.outputs.matrix_files }}
+
+    steps:
+      - name: Check out main branch
+        uses: actions/checkout@v6
+
+      - name: Download artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_PATH }}
+
+      - name: Get list of files for matrix
+        id: get-files
+        run: |
+          files=$(ls -1 veracode_artifact_directory | jq -R . | jq -s .)
+          echo "Files for matrix: $files"
+          files=$(echo $files | jq -c .)  # Compact the JSON array to a single line
+          echo "matrix_files=$files" >> $GITHUB_OUTPUT
+        shell: bash
+
+  pipeline_scan:
+    name: Pipeline Scan
+    runs-on: ubuntu-latest
+    needs: [build, prepare_pipeline_scan]
+    strategy:
+      matrix:
+        file: ${{fromJson(needs.prepare_pipeline_scan.outputs.matrix_files)}}
+
+    steps:
+      - name: Check out main branch
+        uses: actions/checkout@v6
+
+      - name: Download artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_PATH }}
+      
+      - name: Debug Matrix Content
+        run: |
+          echo "Raw matrix files: ${{ needs.prepare_pipeline_scan.outputs.matrix_files }}"
+          echo "Current Matrix: ${{ matrix }}"
+          echo "Current File: ${{ matrix.file }}"
+
+      - name: Veracode Pipeline-Scan
+        if: always()
+        id: pipeline-scan
+        uses: veracode/Veracode-pipeline-scan-action@v1.0.20
+        with:
+          vid: ${{ secrets.VERACODE_API_ID }}
+          vkey: ${{ secrets.VERACODE_API_KEY }}
+          veracode_policy_name: Veracode Recommended Very High
+          file: ${{ env.ARTIFACT_PATH }}/${{ matrix.file }}
+          fail_build: true
+          summary_output: true
+          summary_output_file: ${{ strategy.job-index }}-results.txt
+          json_output: true
+          json_output_file: ${{ strategy.job-index }}-results.json
+          filtered_json_output_file: ${{ strategy.job-index }}-filtered_results.json
+          artifact_name: ${{ matrix.file }}
+          debug: 1
+
+      - name: Convert pipeline scan output to SARIF format
+        if: always()
+        # create code scanning alerts
+        uses: veracode/veracode-pipeline-scan-results-to-sarif@master
+        with:
+          pipeline-results-json: ${{ strategy.job-index }}-filtered_results.json
+          output-results-sarif: veracode-results.sarif
+          ref: ${{ github.ref }}
+          commitSHA: ${{ github.sha }}
+
+      # - name: Create flaws as issues
+      #   if: ${{ inputs.create_issue && always() }}
+      #   uses: veracode/veracode-flaws-to-issues@v2.2.25
+      #   with:
+      #     scan-results-json: ${{ strategy.job-index }}-filtered_results.json
+      #     repo_owner: ${{ github.repository_owner }}
+      #     github-token: ${{ github.token }}
+      #     repo_name: ${{ github.event.repository.name }}
+      #     commitHash: ${{ github.sha }}
