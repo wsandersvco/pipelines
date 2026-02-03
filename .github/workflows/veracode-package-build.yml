@@ -5,11 +5,11 @@ on:
     inputs:
       build_runs_on:
         default: ubuntu-latest
-        required: true
+        required: false
         type: string
       build_packager_image:
         default: veracode/scm-packaging:3.0.0
-        required: true
+        required: false
         type: string
       build_predependency_command:
         required: false
@@ -17,7 +17,7 @@ on:
 
 jobs:
   build-prepare:
-    runs-on: ${{ fromJSON(inputs.build_runs_on) }}
+    runs-on: ${{ fromJSON(inputs.build_runs_on) || 'ubuntu-latest' }}
     name: Build preparation
     outputs:
       runner_os: ${{ steps.identify_runner_os.outputs.runner_os }}
@@ -29,9 +29,9 @@ jobs:
 
   build-linux:
     needs: build-prepare
-    runs-on: ${{ fromJSON(inputs.build_runs_on) }}
+    runs-on: ${{ fromJSON(inputs.build_runs_on) || 'ubuntu-latest' }}
     container:
-      image: ${{ inputs.build_packager_image }}
+      image: ${{ inputs.build_packager_image || 'veracode/scm-packaging:3.0.0' }}
     name: Build on Linux
     if: contains(needs.build-prepare.outputs.runner_os, 'Linux')
     env:
