@@ -3,6 +3,7 @@ name: Veracode Software Composition Analysis - Update Advisor
 on:
   schedule:
     - cron: '0 4 * * 3'
+  workflow_dispatch:
 
 jobs:
   veracode_sca_task:
