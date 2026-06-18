@@ -81,24 +81,28 @@ All stages depend on **Package** (or artifact validation if `artifactPath` provi
                            ↓
         ┌──────────────────┼──────────────────┐
         ↓                  ↓                  ↓
-   [Feature]           [Pull Request]      [Release/Main]
-   feature/*           PR to main          release/*, main
-        ↓                  ↓                  ↓
-┌────────────────┐  ┌──────────────────┐  ┌─────────────────┐
-│ SCA Scan       │  │ SCA Scan         │  │ SCA Scan        │
-│ (dependsOn: ✓) │  │ (dependsOn: ✓)   │  │ (dependsOn: ✓)  │
-│ (parallel)     │  │ (parallel)       │  │ (parallel)      │
-└────────────────┘  └──────────────────┘  └─────────────────┘
-        ↓                  ↓                  ↓
-   [Pipeline Scan]   ┌──────────────────┐  ┌─────────────────┐
-   (no gate)         │ Pipeline Scan    │  │ Sandbox Scan    │
-                     │ (BLOCKING gate)  │  │ (async, async)  │
-                     └──────────────────┘  └─────────────────┘
-                            ↓                  ↓
-                     ┌──────────────────┐  ┌─────────────────┐
-                     │ Sandbox Scan     │  │ Policy Scan     │
-                     │ (async, no-block)│  │ (official cert) │
-                     └──────────────────┘  └─────────────────┘
+   [Feature]           [Pull Request]      [Release] [Main]
+   feature/*           PR to main          release/* main
+        ↓                  ↓                  ↓       ↓
+┌────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│ SCA Scan       │  │ SCA Scan         │  │ SCA Scan         │
+│ (parallel)     │  │ (parallel)       │  │ (parallel)       │
+└────────────────┘  └──────────────────┘  └──────────────────┘
+        ↓                  ↓                  ↓       ↓
+   [Pipeline Scan]   ┌──────────────────┐  ├──────────────────┐
+   (no gate)         │ Pipeline Scan    │  │ Sandbox Scan     │
+                     │ (BLOCKING gate)  │  │ (release only)   │
+                     └──────────────────┘  │ (async)          │
+                            ↓              └──────────────────┘
+                     ┌──────────────────┐          ↓
+                     │ Sandbox Scan     │  ┌──────────────────┐
+                     │ (async, PR only) │  │ Policy Scan      │
+                     │ (non-blocking)   │  │ (main post-merge)│
+                     └──────────────────┘  │ (official cert)  │
+                                           └──────────────────┘
+                     
+                     Note: Sandbox (Stages 4a/4b) and Policy (Stage 5)
+                           are MUTUALLY EXCLUSIVE - only one runs per branch
 ```
 
 ### Stage Definitions
@@ -139,18 +143,21 @@ All stages depend on **Package** (or artifact validation if `artifactPath` provi
 - Full SAST in isolated sandbox environment
 - Async, non-blocking (does not gate pipeline progress)
 - Publishes results to Veracode Platform
+- **Mutually exclusive with Stage 5** (never runs when Policy Scan runs)
 
 **Stage 4b: Sandbox Scan (pull requests, async)** (triggered by PR stage)
 - Condition: `eq(Build.Reason, 'PullRequest')`
 - Triggered after Pipeline Scan completes (even if gate fails)
 - Full SAST in sandbox, non-blocking
 - Allows teams to observe comprehensive scans without delaying PR merge
+- **Mutually exclusive with Stage 5** (never runs when Policy Scan runs)
 
 **Stage 5: Policy Scan (main branch only)** (main only, post-merge)
 - Condition: `eq(Build.SourceBranch, 'refs/heads/main') AND ne(Build.Reason, 'PullRequest')`
 - Full SAST against corporate policies
 - Official production certification
 - Published to Veracode Platform with full history
+- **Mutually exclusive with Stage 4a/4b** (runs only on main after merge, never runs on PRs or release branches)
 
 ---
 
