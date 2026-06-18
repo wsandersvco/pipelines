@@ -1,0 +1,664 @@
+# veracode-scan.yml
+# Reusable Azure DevOps template for comprehensive Veracode security scanning
+#
+# Parameters:
+#   appName: Override auto-detected Veracode app name (optional)
+#   sandboxName: Sandbox identifier for release branch scans (default: azure-release)
+#   credentialGroup: Variable group with Veracode credentials (default: veracode-credentials)
+#   pipelinePolicy: Policy name for PR gate (default: Veracode Recommended Very High)
+#   allowedProjects: Scoped rollout - restrict to these projects (optional, empty = all)
+#   artifactPath: Path to pre-built artifacts - skips Package stage (optional)
+#
+# Branch Strategy:
+#   feature/*  -> Pipeline Scan (no gate) + SCA
+#   PR to main -> Pipeline Scan (gate) + SCA + async Sandbox Scan
+#   release/*  -> Sandbox Scan + SCA
+#   main       -> Policy Scan + SCA
+#
+# Usage:
+#   - template: templates/veracode-scan.yml@veracode-templates
+#     parameters:
+#       appName: 'MyApp'
+#       artifactPath: '$(Build.ArtifactStagingDirectory)'
+
+parameters:
+  - name: appName
+    type: string
+    default: ''
+    displayName: 'Veracode App Name'
+
+  - name: sandboxName
+    type: string
+    default: 'azure-release'
+    displayName: 'Sandbox Name'
+
+  - name: credentialGroup
+    type: string
+    default: 'veracode-credentials'
+    displayName: 'Credential Variable Group'
+
+  - name: pipelinePolicy
+    type: string
+    default: 'Veracode Recommended Very High'
+    displayName: 'Pipeline Scan Policy Name'
+
+  - name: allowedProjects
+    type: object
+    default: []
+    displayName: 'Allowed Projects (for rollout control)'
+
+  - name: artifactPath
+    type: string
+    default: ''
+    displayName: 'Pre-Built Artifacts Path (optional)'
+
+variables:
+  - group: ${{ parameters.credentialGroup }}
+
+stages:
+  # =============================================================================
+  # Rollout Control Validation: Skip if project not in allowedProjects list
+  # =============================================================================
+  - stage: RolloutCheck
+    displayName: 'Rollout scope validation'
+    condition: ne(length(parameters.allowedProjects), 0)
+    jobs:
+      - job: ValidateProjectScope
+        displayName: 'Validate project is in allowed scope'
+        steps:
+          - script: |
+              ALLOWED_PROJECTS="${{ join(parameters.allowedProjects, ' ') }}"
+              CURRENT_PROJECT="$(System.TeamProject)"
+
+              echo "Current project: $CURRENT_PROJECT"
+              echo "Allowed projects: $ALLOWED_PROJECTS"
+
+              # Check if current project is in allowed list
+              FOUND=0
+              for proj in $ALLOWED_PROJECTS; do
+                if [ "$proj" = "$CURRENT_PROJECT" ]; then
+                  FOUND=1
+                  echo "✓ Project $CURRENT_PROJECT is in allowed scope"
+                  break
+                fi
+              done
+
+              if [ $FOUND -eq 0 ]; then
+                echo "ℹ️  Template skipped - project $CURRENT_PROJECT not in allowed rollout scope"
+                echo "##vso[task.logissue type=warning]Veracode template skipped (rollout control)"
+              fi
+
+              exit 0
+            displayName: 'Check project scope'
+
+  # =============================================================================
+  # Stage 1: Package OR ValidateArtifacts (conditional on artifactPath parameter)
+  # =============================================================================
+  - stage: Package
+    displayName: 'Install and package'
+    condition: eq('${{ parameters.artifactPath }}', '')
+    jobs:
+      - job: PackageApp
+        displayName: 'Veracode CLI autopackager'
+        steps:
+          - script: |
+              echo "Installing prerequisites..."
+              sudo apt-get update && sudo apt-get install -y curl unzip grep
+            displayName: 'Install prerequisites'
+
+          - script: |
+              echo "Installing Veracode CLI..."
+              curl -fsS -O https://tools.veracode.com/veracode-cli/install
+              chmod +x ./install
+              ./install
+              if [ -f "./veracode" ]; then
+                chmod +x veracode
+                ./veracode version
+              else
+                echo "##vso[task.logissue type=error]Veracode CLI failed to install"
+                exit 1
+              fi
+            displayName: 'Install Veracode CLI'
+
+          - script: |
+              if [ -z "$VERACODE_API_ID" ] || [ -z "$VERACODE_API_KEY" ]; then
+                echo "##vso[task.logissue type=error]VERACODE_API_ID and VERACODE_API_KEY are required"
+                echo "Configure them in variable group: ${{ parameters.credentialGroup }}"
+                exit 1
+              fi
+              echo "✓ Veracode credentials verified"
+            displayName: 'Validate Veracode credentials'
+            env:
+              VERACODE_API_ID: $(VERACODE_API_ID)
+              VERACODE_API_KEY: $(VERACODE_API_KEY)
+
+          - script: |
+              # Extract org name from collection URI
+              ORG_NAME=$(echo "$(System.TeamFoundationCollectionUri)" | sed -E 's|https://dev.azure.com/([^/]+)/?|\1|' | sed -E 's|https://([^.]+).visualstudio.com/?|\1|')
+              PROJECT_NAME="$(System.TeamProject)"
+              REPO_NAME="$(Build.Repository.Name)"
+
+              # Use custom name if provided, otherwise build from org/project/repo
+              if [ -n "${{ parameters.appName }}" ]; then
+                APP_NAME="${{ parameters.appName }}"
+              else
+                APP_NAME="${ORG_NAME}/${PROJECT_NAME}/${REPO_NAME}"
+              fi
+
+              echo "Veracode Application Profile: $APP_NAME"
+              echo "##vso[task.setvariable variable=APP_NAME]$APP_NAME"
+            displayName: 'Set Veracode app name'
+
+          - script: |
+              echo "Running Veracode Autopackager..."
+              mkdir -p verascan
+              ./veracode package --source "$(Build.SourcesDirectory)" --output verascan --trust
+              echo "Packaged artifacts:"
+              ls -lhR verascan
+            displayName: 'Veracode autopackager'
+
+          - script: |
+              echo "Listing all packaged artifacts..."
+              find verascan -type f \( -name "*.war" -o -name "*.jar" -o -name "*.zip" \) > artifact_list.txt
+
+              if [ ! -s artifact_list.txt ]; then
+                echo "##vso[task.logissue type=error]No packaged artifacts found"
+                ls -lR verascan
+                exit 1
+              fi
+
+              echo "Artifacts found:"
+              cat artifact_list.txt
+
+              ARTIFACT_COUNT=$(wc -l < artifact_list.txt)
+              echo "Total artifacts: $ARTIFACT_COUNT"
+              echo "##vso[task.setvariable variable=ARTIFACT_COUNT;isOutput=true]$ARTIFACT_COUNT"
+            name: ListArtifacts
+            displayName: 'List and validate artifacts'
+
+          - script: |
+              cp artifact_list.txt verascan/
+            displayName: 'Prepare artifacts for publishing'
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(System.DefaultWorkingDirectory)/verascan'
+              artifactName: 'verascan'
+            displayName: 'Publish packaged artifacts'
+
+  # =============================================================================
+  # Stage 1b: ValidateArtifacts (when pre-built artifacts provided)
+  # =============================================================================
+  - stage: ValidateArtifacts
+    displayName: 'Validate provided artifacts'
+    condition: ne('${{ parameters.artifactPath }}', '')
+    jobs:
+      - job: ValidateArtifactPath
+        displayName: 'Validate and list artifacts'
+        steps:
+          - script: |
+              ARTIFACT_PATH="${{ parameters.artifactPath }}"
+              echo "Validating artifact path: $ARTIFACT_PATH"
+
+              if [ ! -d "$ARTIFACT_PATH" ]; then
+                echo "##vso[task.logissue type=error]Artifact path not found: $ARTIFACT_PATH"
+                exit 1
+              fi
+
+              echo "✓ Artifact path exists"
+
+              # List and validate scannable artifacts
+              find "$ARTIFACT_PATH" -type f \( -name "*.war" -o -name "*.jar" -o -name "*.zip" \) > artifact_list.txt
+
+              if [ ! -s artifact_list.txt ]; then
+                echo "##vso[task.logissue type=error]No scannable artifacts (.jar, .war, .zip) found in $ARTIFACT_PATH"
+                echo "Contents of artifact path:"
+                ls -lR "$ARTIFACT_PATH"
+                exit 1
+              fi
+
+              echo "✓ Scannable artifacts found:"
+              cat artifact_list.txt
+
+              ARTIFACT_COUNT=$(wc -l < artifact_list.txt)
+              echo "Total artifacts: $ARTIFACT_COUNT"
+              echo "##vso[task.setvariable variable=ARTIFACT_COUNT;isOutput=true]$ARTIFACT_COUNT"
+
+              # Export the artifact path for downstream stages
+              echo "##vso[task.setvariable variable=ARTIFACT_SOURCE_PATH]$ARTIFACT_PATH"
+            name: ValidateArtifacts
+            displayName: 'Validate and list artifacts'
+
+          - script: |
+              # For consistency with Package stage, copy artifact_list to a standard location
+              mkdir -p verascan_metadata
+              cp artifact_list.txt verascan_metadata/
+              echo "Artifact list prepared for downstream stages"
+            displayName: 'Prepare artifact metadata'
+
+          - script: |
+              if [ -n "$(VERACODE_API_ID)" ] && [ -n "$(VERACODE_API_KEY)" ]; then
+                echo "✓ Veracode credentials verified"
+              else
+                echo "##vso[task.logissue type=error]VERACODE_API_ID and VERACODE_API_KEY are required"
+                exit 1
+              fi
+            displayName: 'Validate Veracode credentials'
+            env:
+              VERACODE_API_ID: $(VERACODE_API_ID)
+              VERACODE_API_KEY: $(VERACODE_API_KEY)
+
+          - script: |
+              # Set APP_NAME for downstream stages (same logic as Package stage)
+              if [ -n "${{ parameters.appName }}" ]; then
+                APP_NAME="${{ parameters.appName }}"
+              else
+                ORG_NAME=$(echo "$(System.TeamFoundationCollectionUri)" | sed -E 's|https://dev.azure.com/([^/]+)/?|\1|' | sed -E 's|https://([^.]+).visualstudio.com/?|\1|')
+                PROJECT_NAME="$(System.TeamProject)"
+                REPO_NAME="$(Build.Repository.Name)"
+                APP_NAME="${ORG_NAME}/${PROJECT_NAME}/${REPO_NAME}"
+              fi
+
+              echo "Veracode Application Profile: $APP_NAME"
+              echo "##vso[task.setvariable variable=APP_NAME]$APP_NAME"
+            displayName: 'Set Veracode app name'
+
+  # =============================================================================
+  # Stage 2: SCA (all branches, parallel)
+  # =============================================================================
+  - stage: SCA
+    displayName: 'SCA scan'
+    dependsOn:
+      - Package
+      - ValidateArtifacts
+    condition: |
+      or(
+        succeeded('Package'),
+        succeeded('ValidateArtifacts')
+      )
+    jobs:
+      - job: SCAScan
+        displayName: 'Veracode Agent-Based SCA'
+        steps:
+          - checkout: self
+          - script: |
+              echo "Running Veracode Agent-Based SCA..."
+              curl -sSL https://download.sourceclear.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "SCA scan completed"
+            displayName: 'Veracode SCA scan'
+            env:
+              SRCCLR_API_TOKEN: $(SRCCLR_API_TOKEN)
+
+  # =============================================================================
+  # Stage 3a: Pipeline Scan - Feature Branches (no gate, each artifact)
+  # =============================================================================
+  - stage: PipelineScan
+    displayName: 'Pipeline Scan (feature)'
+    dependsOn:
+      - Package
+      - ValidateArtifacts
+    condition: |
+      and(
+        or(
+          succeeded('Package'),
+          succeeded('ValidateArtifacts')
+        ),
+        ne(variables['Build.Reason'], 'PullRequest'),
+        startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/'),
+        ne(variables['Build.SourceBranch'], 'refs/heads/main')
+      )
+    jobs:
+      - job: PipelineScanJob
+        displayName: 'Veracode Pipeline Scan (all artifacts)'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: 'verascan'
+              targetPath: '$(System.DefaultWorkingDirectory)/verascan'
+            condition: eq('${{ parameters.artifactPath }}', '')
+
+          - script: |
+              if [ -n "${{ parameters.artifactPath }}" ]; then
+                cp artifact_list.txt verascan_metadata/artifact_list.txt || true
+              fi
+            displayName: 'Prepare artifact list for scan'
+
+          - script: |
+              echo "Downloading Veracode Pipeline Scanner..."
+              curl -sSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+              unzip -o pipeline-scan-LATEST.zip
+              if [ ! -f "pipeline-scan.jar" ]; then
+                echo "##vso[task.logissue type=error]Failed to download pipeline-scan.jar"
+                exit 1
+              fi
+            displayName: 'Download Pipeline Scanner'
+
+          - script: |
+              echo "Running Pipeline Scan on each artifact (feature branch, no gate)..."
+              mkdir -p scan_results
+              SCAN_COUNT=0
+
+              # Determine artifact list location
+              if [ -n "${{ parameters.artifactPath }}" ]; then
+                ARTIFACT_LIST="artifact_list.txt"
+              else
+                ARTIFACT_LIST="verascan/artifact_list.txt"
+              fi
+
+              while IFS= read -r artifact; do
+                if [[ "$artifact" == *"veracode_upload_bundle.zip" ]]; then
+                  continue
+                fi
+                SCAN_COUNT=$((SCAN_COUNT + 1))
+                ARTIFACT_NAME=$(basename "$artifact")
+                echo ""
+                echo "=========================================="
+                echo "Scanning [$SCAN_COUNT]: $ARTIFACT_NAME"
+                echo "=========================================="
+
+                java -jar pipeline-scan.jar \
+                  -f "$artifact" \
+                  -vid $VERACODE_API_ID \
+                  -vkey $VERACODE_API_KEY \
+                  --fail_on_severity "" \
+                  --issue_details true \
+                  -jo true \
+                  || echo "Pipeline scan completed with findings for $ARTIFACT_NAME"
+
+                if [ -f "results.json" ]; then
+                  mv results.json "scan_results/${ARTIFACT_NAME}_results.json"
+                  echo "Results saved: scan_results/${ARTIFACT_NAME}_results.json"
+                else
+                  echo "WARNING: No results.json produced for $ARTIFACT_NAME (artifact may not be scannable)"
+                fi
+              done < "$ARTIFACT_LIST"
+
+              echo ""
+              echo "=========================================="
+              echo "Pipeline Scan completed for $SCAN_COUNT artifacts (feature branch)"
+              echo "=========================================="
+            displayName: 'Pipeline Scan (no gate, all artifacts)'
+            env:
+              VERACODE_API_ID: $(VERACODE_API_ID)
+              VERACODE_API_KEY: $(VERACODE_API_KEY)
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(System.DefaultWorkingDirectory)/scan_results'
+              artifactName: 'veracode-pipeline-results'
+            condition: and(succeededOrFailed(), ne(variables['Agent.JobStatus'], 'Canceled'))
+            displayName: 'Publish Pipeline Scan results'
+            continueOnError: true
+
+  # =============================================================================
+  # Stage 3b: Pipeline Scan - Pull Requests (gate enabled, each artifact)
+  # =============================================================================
+  - stage: PipelineScanGate
+    displayName: 'Pipeline Scan (PR gate)'
+    dependsOn:
+      - Package
+      - ValidateArtifacts
+    condition: |
+      and(
+        or(
+          succeeded('Package'),
+          succeeded('ValidateArtifacts')
+        ),
+        eq(variables['Build.Reason'], 'PullRequest')
+      )
+    jobs:
+      - job: PipelineScanGateJob
+        displayName: 'Veracode Pipeline Scan with gate (all artifacts)'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: 'verascan'
+              targetPath: '$(System.DefaultWorkingDirectory)/verascan'
+            condition: eq('${{ parameters.artifactPath }}', '')
+
+          - script: |
+              if [ -n "${{ parameters.artifactPath }}" ]; then
+                cp artifact_list.txt verascan_metadata/artifact_list.txt || true
+              fi
+            displayName: 'Prepare artifact list for scan'
+
+          - script: |
+              echo "Downloading Veracode Pipeline Scanner..."
+              curl -sSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+              unzip -o pipeline-scan-LATEST.zip
+              if [ ! -f "pipeline-scan.jar" ]; then
+                echo "##vso[task.logissue type=error]Failed to download pipeline-scan.jar"
+                exit 1
+              fi
+            displayName: 'Download Pipeline Scanner'
+
+          - script: |
+              echo "Running Pipeline Scan with Policy Gate on each artifact..."
+              mkdir -p scan_results
+              FAILED=0
+              SCAN_COUNT=0
+              FAILED_ARTIFACTS=""
+
+              # Determine artifact list location
+              if [ -n "${{ parameters.artifactPath }}" ]; then
+                ARTIFACT_LIST="artifact_list.txt"
+              else
+                ARTIFACT_LIST="verascan/artifact_list.txt"
+              fi
+
+              while IFS= read -r artifact; do
+                if [[ "$artifact" == *"veracode_upload_bundle.zip" ]]; then
+                  continue
+                fi
+                SCAN_COUNT=$((SCAN_COUNT + 1))
+                ARTIFACT_NAME=$(basename "$artifact")
+                echo ""
+                echo "=========================================="
+                echo "Scanning [$SCAN_COUNT]: $ARTIFACT_NAME"
+                echo "=========================================="
+
+                if ! java -jar pipeline-scan.jar \
+                  -f "$artifact" \
+                  -vid $VERACODE_API_ID \
+                  -vkey $VERACODE_API_KEY \
+                  --issue_details true \
+                  --policy_name "${{ parameters.pipelinePolicy }}" \
+                  -jo true; then
+                  FAILED=1
+                  FAILED_ARTIFACTS="$FAILED_ARTIFACTS $ARTIFACT_NAME"
+                  echo "##vso[task.logissue type=warning]Policy gate failed for: $ARTIFACT_NAME"
+                fi
+
+                if [ -f "results.json" ]; then
+                  mv results.json "scan_results/${ARTIFACT_NAME}_results.json"
+                  echo "Results saved: scan_results/${ARTIFACT_NAME}_results.json"
+                else
+                  echo "WARNING: No results.json produced for $ARTIFACT_NAME (artifact may not be scannable)"
+                fi
+              done < "$ARTIFACT_LIST"
+
+              echo ""
+              echo "=========================================="
+              echo "Pipeline Scan completed for $SCAN_COUNT artifacts"
+              if [ $FAILED -eq 1 ]; then
+                echo "##vso[task.logissue type=error]Policy gate failed for:$FAILED_ARTIFACTS"
+                echo "Artifacts with policy violations:$FAILED_ARTIFACTS"
+              fi
+              echo "=========================================="
+
+              exit $FAILED
+            displayName: 'Pipeline Scan (gate enabled, all artifacts)'
+            env:
+              VERACODE_API_ID: $(VERACODE_API_ID)
+              VERACODE_API_KEY: $(VERACODE_API_KEY)
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(System.DefaultWorkingDirectory)/scan_results'
+              artifactName: 'veracode-pipeline-gate-results'
+            condition: and(succeededOrFailed(), ne(variables['Agent.JobStatus'], 'Canceled'))
+            displayName: 'Publish Pipeline Scan results'
+            continueOnError: true
+
+  # =============================================================================
+  # Stage 4a: Sandbox Scan - Release Branches
+  # =============================================================================
+  - stage: SandboxScan
+    displayName: 'Sandbox Scan (release)'
+    dependsOn:
+      - Package
+      - ValidateArtifacts
+    condition: |
+      and(
+        or(
+          succeeded('Package'),
+          succeeded('ValidateArtifacts')
+        ),
+        startsWith(variables['Build.SourceBranch'], 'refs/heads/release/')
+      )
+    jobs:
+      - job: SandboxScanJob
+        displayName: 'Veracode Sandbox Scan'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: 'verascan'
+              targetPath: '$(System.DefaultWorkingDirectory)/verascan'
+            condition: eq('${{ parameters.artifactPath }}', '')
+
+          - script: |
+              echo "Artifacts to upload:"
+              if [ -n "${{ parameters.artifactPath }}" ]; then
+                ls -lh "${{ parameters.artifactPath }}"
+              else
+                ls -lh verascan/
+              fi
+            displayName: 'List artifacts for upload'
+
+          - task: Veracode@3
+            displayName: 'Veracode Sandbox Scan'
+            inputs:
+              ConnectionDetailsSelection: 'Credentials'
+              apiId: $(VERACODE_API_ID)
+              apiKey: $(VERACODE_API_KEY)
+              veracodeAppProfile: '$(APP_NAME)'
+              version: 'Release $(Build.BuildNumber)'
+              optargs: '-deleteincompletescan 1'
+              filepath: ${{ if eq(parameters.artifactPath, '') then 'verascan' else parameters.artifactPath }}
+              createProfile: true
+              createSandbox: true
+              sandboxName: ${{ parameters.sandboxName }}
+              importResults: true
+              maximumWaitTime: '120'
+            continueOnError: true
+
+  # =============================================================================
+  # Stage 4b: Sandbox Scan - Pull Requests (async, non-blocking)
+  # =============================================================================
+  - stage: SandboxScanPR
+    displayName: 'Sandbox Scan (PR async)'
+    dependsOn:
+      - PipelineScanGate
+    condition: |
+      and(
+        succeededOrFailed('PipelineScanGate'),
+        eq(variables['Build.Reason'], 'PullRequest')
+      )
+    jobs:
+      - job: SandboxScanPRJob
+        displayName: 'Veracode Sandbox Scan (async)'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: 'verascan'
+              targetPath: '$(System.DefaultWorkingDirectory)/verascan'
+            condition: eq('${{ parameters.artifactPath }}', '')
+
+          - script: |
+              echo "Artifacts to upload:"
+              if [ -n "${{ parameters.artifactPath }}" ]; then
+                ls -lh "${{ parameters.artifactPath }}"
+              else
+                ls -lh verascan/
+              fi
+            displayName: 'List artifacts for upload'
+
+          - script: |
+              # Re-set APP_NAME for this stage
+              if [ -n "${{ parameters.appName }}" ]; then
+                APP_NAME="${{ parameters.appName }}"
+              else
+                ORG_NAME=$(echo "$(System.TeamFoundationCollectionUri)" | sed -E 's|https://dev.azure.com/([^/]+)/?|\1|' | sed -E 's|https://([^.]+).visualstudio.com/?|\1|')
+                PROJECT_NAME="$(System.TeamProject)"
+                REPO_NAME="$(Build.Repository.Name)"
+                APP_NAME="${ORG_NAME}/${PROJECT_NAME}/${REPO_NAME}"
+              fi
+              echo "##vso[task.setvariable variable=APP_NAME]$APP_NAME"
+            displayName: 'Set Veracode app name'
+
+          - task: Veracode@3
+            displayName: 'Veracode Sandbox Scan (async)'
+            inputs:
+              ConnectionDetailsSelection: 'Credentials'
+              apiId: $(VERACODE_API_ID)
+              apiKey: $(VERACODE_API_KEY)
+              veracodeAppProfile: '$(APP_NAME)'
+              version: 'PR $(Build.BuildNumber)'
+              optargs: '-deleteincompletescan 1'
+              filepath: ${{ if eq(parameters.artifactPath, '') then 'verascan' else parameters.artifactPath }}
+              createProfile: true
+              createSandbox: true
+              sandboxName: '${{ parameters.sandboxName }}-pr-$(Build.PullRequest.PullRequestNumber)'
+              importResults: true
+              maximumWaitTime: '120'
+            continueOnError: true
+
+  # =============================================================================
+  # Stage 5: Policy Scan - Main Branch (post-merge only)
+  # =============================================================================
+  - stage: PolicyScan
+    displayName: 'Policy Scan (production)'
+    dependsOn:
+      - Package
+      - ValidateArtifacts
+    condition: |
+      and(
+        or(
+          succeeded('Package'),
+          succeeded('ValidateArtifacts')
+        ),
+        eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+        ne(variables['Build.Reason'], 'PullRequest')
+      )
+    jobs:
+      - job: PolicyScanJob
+        displayName: 'Veracode Policy Scan'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: 'verascan'
+              targetPath: '$(System.DefaultWorkingDirectory)/verascan'
+            condition: eq('${{ parameters.artifactPath }}', '')
+
+          - script: |
+              echo "Artifacts to upload:"
+              if [ -n "${{ parameters.artifactPath }}" ]; then
+                ls -lh "${{ parameters.artifactPath }}"
+              else
+                ls -lh verascan/
+              fi
+            displayName: 'List artifacts for upload'
+
+          - task: Veracode@3
+            displayName: 'Veracode Policy Scan'
+            inputs:
+              ConnectionDetailsSelection: 'Credentials'
+              apiId: $(VERACODE_API_ID)
+              apiKey: $(VERACODE_API_KEY)
+              veracodeAppProfile: '$(APP_NAME)'
+              version: 'Build $(Build.BuildNumber)'
+              optargs: '-deleteincompletescan 1'
+              filepath: ${{ if eq(parameters.artifactPath, '') then 'verascan' else parameters.artifactPath }}
+              createProfile: true
+              importResults: true
+              maximumWaitTime: '120'
+            continueOnError: true
