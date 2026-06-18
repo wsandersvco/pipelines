@@ -1,4 +1,17 @@
 # azure-pipelines.yml
+# REFERENCE IMPLEMENTATION - Use templates/veracode-scan.yml for new projects
+#
+# This uses the Veracode@3 task for Sandbox/Policy scans (newer approach).
+# It's kept here as:
+# - Documentation of using the Veracode@3 task
+# - Reference for custom pipeline designs
+# - Historical record of configuration patterns
+#
+# For new projects, consume the reusable template instead:
+#   https://github.com/YourOrg/pipelines/blob/main/docs/TEMPLATE-USAGE.md
+#
+# ---
+#
 # Veracode Security Scanning for Azure Pipelines (Multi-Artifact Support)
 #
 # Required variables (configure in Variable Group "veracode-credentials"):

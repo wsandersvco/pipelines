@@ -4,6 +4,32 @@ Automated security strategy that integrates multiple Veracode products into the 
 
 **Supported Technologies**: Java (Maven/Gradle/Ant), .NET (Core/Framework), Node.js, Python, Go, PHP, Ruby, Scala, and more.
 
+## 🚀 New: Reusable Template
+
+**For new projects, use the reusable template** instead of copying pipelines:
+
+```yaml
+resources:
+  repositories:
+    - repository: veracode-templates
+      type: git
+      name: YourOrg/pipelines
+
+stages:
+  - template: templates/veracode-scan.yml@veracode-templates
+    parameters:
+      appName: 'MyApplication'
+```
+
+**Benefits:**
+- ✅ Zero duplication across projects
+- ✅ Single source of truth for scanning logic
+- ✅ Easy updates (one change benefits all projects)
+- ✅ Safe rollout control with `allowedProjects` parameter
+- ✅ Flexible artifact handling (autopackager or pre-built)
+
+**Documentation:** See `docs/TEMPLATE-USAGE.md` for complete guide
+
 ---
 
 ## Scan Strategy
