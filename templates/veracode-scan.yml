@@ -7,7 +7,8 @@
 #   credentialGroup: Variable group with Veracode credentials (default: veracode-credentials)
 #   pipelinePolicy: Policy name for PR gate (default: Veracode Recommended Very High)
 #   allowedProjects: Scoped rollout - restrict to these projects (optional, empty = all)
-#   artifactPath: Path to pre-built artifacts - skips Package stage (optional)
+#   artifactName: Published artifact name to scan (optional, empty = use autopackager)
+#   artifactPath: Download path for artifact (default: verascan)
 #
 # Branch Strategy:
 #   feature/*  -> Pipeline Scan (no gate) + SCA
@@ -15,11 +16,17 @@
 #   release/*  -> Sandbox Scan + SCA
 #   main       -> Policy Scan + SCA
 #
-# Usage:
+# Usage - Autopackager:
 #   - template: templates/veracode-scan.yml@veracode-templates
 #     parameters:
 #       appName: 'MyApp'
-#       artifactPath: '$(Build.ArtifactStagingDirectory)'
+#
+# Usage - Pre-built artifact:
+#   - template: templates/veracode-scan.yml@veracode-templates
+#     parameters:
+#       appName: 'MyApp'
+#       artifactName: 'compiled-app'
+#       artifactPath: '$(Pipeline.Workspace)/artifacts'
 
 parameters:
   - name: appName
@@ -47,10 +54,15 @@ parameters:
     default: []
     displayName: 'Allowed Projects (for rollout control)'
 
-  - name: artifactPath
+  - name: artifactName
     type: string
     default: ''
-    displayName: 'Pre-Built Artifacts Path (optional)'
+    displayName: 'Published Artifact Name (optional, empty = autopackager)'
+
+  - name: artifactPath
+    type: string
+    default: 'verascan'
+    displayName: 'Download Path for Artifact'
 
 variables:
   - group: ${{ parameters.credentialGroup }}
@@ -92,11 +104,11 @@ stages:
             displayName: 'Check project scope'
 
   # =============================================================================
-  # Stage 1: Package OR ValidateArtifacts (conditional on artifactPath parameter)
+  # Stage 1: Package OR DownloadArtifacts (conditional on artifactName parameter)
   # =============================================================================
   - stage: Package
     displayName: 'Install and package'
-    condition: eq('${{ parameters.artifactPath }}', '')
+    condition: eq('${{ parameters.artifactName }}', '')
     jobs:
       - job: PackageApp
         displayName: 'Veracode CLI autopackager'
@@ -187,33 +199,31 @@ stages:
             displayName: 'Publish packaged artifacts'
 
   # =============================================================================
-  # Stage 1b: ValidateArtifacts (when pre-built artifacts provided)
+  # Stage 1b: DownloadArtifacts (when pre-built artifact name provided)
   # =============================================================================
-  - stage: ValidateArtifacts
-    displayName: 'Validate provided artifacts'
-    condition: ne('${{ parameters.artifactPath }}', '')
+  - stage: DownloadArtifacts
+    displayName: 'Download published artifact'
+    condition: ne('${{ parameters.artifactName }}', '')
     jobs:
-      - job: ValidateArtifactPath
-        displayName: 'Validate and list artifacts'
+      - job: DownloadArtifactJob
+        displayName: 'Download and list artifact'
         steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: '${{ parameters.artifactName }}'
+              targetPath: '${{ parameters.artifactPath }}'
+            displayName: 'Download published artifact'
+
           - script: |
               ARTIFACT_PATH="${{ parameters.artifactPath }}"
-              echo "Validating artifact path: $ARTIFACT_PATH"
-
-              if [ ! -d "$ARTIFACT_PATH" ]; then
-                echo "##vso[task.logissue type=error]Artifact path not found: $ARTIFACT_PATH"
-                exit 1
-              fi
-
-              echo "✓ Artifact path exists"
+              echo "Listing downloaded artifact contents..."
+              ls -lhR "$ARTIFACT_PATH"
 
               # List and validate scannable artifacts
               find "$ARTIFACT_PATH" -type f \( -name "*.war" -o -name "*.jar" -o -name "*.zip" \) > artifact_list.txt
 
               if [ ! -s artifact_list.txt ]; then
-                echo "##vso[task.logissue type=error]No scannable artifacts (.jar, .war, .zip) found in $ARTIFACT_PATH"
-                echo "Contents of artifact path:"
-                ls -lR "$ARTIFACT_PATH"
+                echo "##vso[task.logissue type=error]No scannable artifacts (.jar, .war, .zip) found in ${{ parameters.artifactName }}"
                 exit 1
               fi
 
@@ -223,18 +233,7 @@ stages:
               ARTIFACT_COUNT=$(wc -l < artifact_list.txt)
               echo "Total artifacts: $ARTIFACT_COUNT"
               echo "##vso[task.setvariable variable=ARTIFACT_COUNT;isOutput=true]$ARTIFACT_COUNT"
-
-              # Export the artifact path for downstream stages
-              echo "##vso[task.setvariable variable=ARTIFACT_SOURCE_PATH]$ARTIFACT_PATH"
-            name: ValidateArtifacts
             displayName: 'Validate and list artifacts'
-
-          - script: |
-              # For consistency with Package stage, copy artifact_list to a standard location
-              mkdir -p verascan_metadata
-              cp artifact_list.txt verascan_metadata/
-              echo "Artifact list prepared for downstream stages"
-            displayName: 'Prepare artifact metadata'
 
           - script: |
               if [ -n "$(VERACODE_API_ID)" ] && [ -n "$(VERACODE_API_KEY)" ]; then
@@ -270,11 +269,11 @@ stages:
     displayName: 'SCA scan'
     dependsOn:
       - Package
-      - ValidateArtifacts
+      - DownloadArtifacts
     condition: |
       or(
         succeeded('Package'),
-        succeeded('ValidateArtifacts')
+        succeeded('DownloadArtifacts')
       )
     jobs:
       - job: SCAScan
@@ -295,12 +294,12 @@ stages:
     displayName: 'Pipeline Scan (feature)'
     dependsOn:
       - Package
-      - ValidateArtifacts
+      - DownloadArtifacts
     condition: |
       and(
         or(
           succeeded('Package'),
-          succeeded('ValidateArtifacts')
+          succeeded('DownloadArtifacts')
         ),
         ne(variables['Build.Reason'], 'PullRequest'),
         startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/'),
@@ -314,13 +313,15 @@ stages:
             inputs:
               artifactName: 'verascan'
               targetPath: '$(System.DefaultWorkingDirectory)/verascan'
-            condition: eq('${{ parameters.artifactPath }}', '')
+            condition: eq('${{ parameters.artifactName }}', '')
+            displayName: 'Download autopackaged artifacts'
 
-          - script: |
-              if [ -n "${{ parameters.artifactPath }}" ]; then
-                cp artifact_list.txt verascan_metadata/artifact_list.txt || true
-              fi
-            displayName: 'Prepare artifact list for scan'
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: '${{ parameters.artifactName }}'
+              targetPath: '${{ parameters.artifactPath }}'
+            condition: ne('${{ parameters.artifactName }}', '')
+            displayName: 'Download provided artifact'
 
           - script: |
               echo "Downloading Veracode Pipeline Scanner..."
@@ -338,8 +339,8 @@ stages:
               SCAN_COUNT=0
 
               # Determine artifact list location
-              if [ -n "${{ parameters.artifactPath }}" ]; then
-                ARTIFACT_LIST="artifact_list.txt"
+              if [ -n "${{ parameters.artifactName }}" ]; then
+                ARTIFACT_LIST="${{ parameters.artifactPath }}/artifact_list.txt"
               else
                 ARTIFACT_LIST="verascan/artifact_list.txt"
               fi
@@ -396,12 +397,12 @@ stages:
     displayName: 'Pipeline Scan (PR gate)'
     dependsOn:
       - Package
-      - ValidateArtifacts
+      - DownloadArtifacts
     condition: |
       and(
         or(
           succeeded('Package'),
-          succeeded('ValidateArtifacts')
+          succeeded('DownloadArtifacts')
         ),
         eq(variables['Build.Reason'], 'PullRequest')
       )
@@ -413,13 +414,15 @@ stages:
             inputs:
               artifactName: 'verascan'
               targetPath: '$(System.DefaultWorkingDirectory)/verascan'
-            condition: eq('${{ parameters.artifactPath }}', '')
+            condition: eq('${{ parameters.artifactName }}', '')
+            displayName: 'Download autopackaged artifacts'
 
-          - script: |
-              if [ -n "${{ parameters.artifactPath }}" ]; then
-                cp artifact_list.txt verascan_metadata/artifact_list.txt || true
-              fi
-            displayName: 'Prepare artifact list for scan'
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: '${{ parameters.artifactName }}'
+              targetPath: '${{ parameters.artifactPath }}'
+            condition: ne('${{ parameters.artifactName }}', '')
+            displayName: 'Download provided artifact'
 
           - script: |
               echo "Downloading Veracode Pipeline Scanner..."
@@ -439,8 +442,8 @@ stages:
               FAILED_ARTIFACTS=""
 
               # Determine artifact list location
-              if [ -n "${{ parameters.artifactPath }}" ]; then
-                ARTIFACT_LIST="artifact_list.txt"
+              if [ -n "${{ parameters.artifactName }}" ]; then
+                ARTIFACT_LIST="${{ parameters.artifactPath }}/artifact_list.txt"
               else
                 ARTIFACT_LIST="verascan/artifact_list.txt"
               fi
@@ -506,12 +509,12 @@ stages:
     displayName: 'Sandbox Scan (release)'
     dependsOn:
       - Package
-      - ValidateArtifacts
+      - DownloadArtifacts
     condition: |
       and(
         or(
           succeeded('Package'),
-          succeeded('ValidateArtifacts')
+          succeeded('DownloadArtifacts')
         ),
         startsWith(variables['Build.SourceBranch'], 'refs/heads/release/')
       )
@@ -523,11 +526,19 @@ stages:
             inputs:
               artifactName: 'verascan'
               targetPath: '$(System.DefaultWorkingDirectory)/verascan'
-            condition: eq('${{ parameters.artifactPath }}', '')
+            condition: eq('${{ parameters.artifactName }}', '')
+            displayName: 'Download autopackaged artifacts'
+
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: '${{ parameters.artifactName }}'
+              targetPath: '${{ parameters.artifactPath }}'
+            condition: ne('${{ parameters.artifactName }}', '')
+            displayName: 'Download provided artifact'
 
           - script: |
               echo "Artifacts to upload:"
-              if [ -n "${{ parameters.artifactPath }}" ]; then
+              if [ -n "${{ parameters.artifactName }}" ]; then
                 ls -lh "${{ parameters.artifactPath }}"
               else
                 ls -lh verascan/
@@ -543,7 +554,7 @@ stages:
               veracodeAppProfile: '$(APP_NAME)'
               version: 'Release $(Build.BuildNumber)'
               optargs: '-deleteincompletescan 1'
-              filepath: ${{ if eq(parameters.artifactPath, '') then 'verascan' else parameters.artifactPath }}
+              filepath: ${{ if eq(parameters.artifactName, '') then 'verascan' else parameters.artifactPath }}
               createProfile: true
               createSandbox: true
               sandboxName: ${{ parameters.sandboxName }}
@@ -619,12 +630,12 @@ stages:
     displayName: 'Policy Scan (production)'
     dependsOn:
       - Package
-      - ValidateArtifacts
+      - DownloadArtifacts
     condition: |
       and(
         or(
           succeeded('Package'),
-          succeeded('ValidateArtifacts')
+          succeeded('DownloadArtifacts')
         ),
         eq(variables['Build.SourceBranch'], 'refs/heads/main'),
         ne(variables['Build.Reason'], 'PullRequest')
