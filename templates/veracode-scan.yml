@@ -60,9 +60,9 @@ parameters:
     displayName: 'Pipeline Scan Policy Name'
 
   - name: allowedProjects
-    type: object
-    default: []
-    displayName: 'Allowed Projects (for rollout control)'
+    type: string
+    default: ''
+    displayName: 'Allowed Projects (comma-separated, optional for rollout control)'
 
   - name: artifactName
     type: string
@@ -85,10 +85,10 @@ stages:
         displayName: 'Validate project is in allowed scope'
         steps:
           - script: |
-              ALLOWED_PROJECTS_STR="${{ join(parameters.allowedProjects, ',') }}"
+              ALLOWED_PROJECTS="${{ parameters.allowedProjects }}"
 
               # If allowedProjects is empty, proceed (no rollout control)
-              if [ -z "$ALLOWED_PROJECTS_STR" ]; then
+              if [ -z "$ALLOWED_PROJECTS" ]; then
                 echo "##vso[task.setvariable variable=PROCEED_WITH_SCAN;isOutput=true]true"
                 echo "ℹ️  No rollout control - template enabled for all projects"
                 exit 0
@@ -96,11 +96,11 @@ stages:
 
               CURRENT_PROJECT="$(System.TeamProject)"
               echo "Current project: $CURRENT_PROJECT"
-              echo "Allowed projects: $ALLOWED_PROJECTS_STR"
+              echo "Allowed projects: $ALLOWED_PROJECTS"
 
               # Check if current project is in allowed list (comma-separated)
               FOUND=0
-              IFS=',' read -ra ALLOWED_ARRAY <<< "$ALLOWED_PROJECTS_STR"
+              IFS=',' read -ra ALLOWED_ARRAY <<< "$ALLOWED_PROJECTS"
               for proj in "${ALLOWED_ARRAY[@]}"; do
                 proj=$(echo "$proj" | xargs)  # Trim whitespace
                 if [ "$proj" = "$CURRENT_PROJECT" ]; then
