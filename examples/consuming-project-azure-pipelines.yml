@@ -91,8 +91,9 @@ stages:
       #   - 'ProjectB'
 
       # Optional: Use pre-built artifacts instead of autopackager
-      # Uncomment to skip Package stage and use your build output:
-      # artifactPath: '$(Pipeline.Workspace)/compiled-app'
+      # Provide the artifact name published above + download path:
+      # artifactName: 'compiled-app'
+      # artifactPath: '$(Pipeline.Workspace)/veracode-input'
 
 ---
 
@@ -133,11 +134,12 @@ stages:
 #   - template: templates/veracode-scan.yml@veracode-templates
 #     parameters:
 #       appName: 'DotNetApp'
-#       artifactPath: '$(Pipeline.Workspace)/dotnet-build'
+#       artifactName: 'dotnet-build'
+#       artifactPath: '$(Pipeline.Workspace)/dotnet-input'
 #
 # Result:
 # - Package stage skipped
-# - Pre-built artifacts validated and scanned directly
+# - Template downloads published artifact and scans directly
 # - Faster iteration (no re-packaging)
 
 
@@ -180,11 +182,12 @@ stages:
 #       sandboxName: 'gradle-pre-release'
 #       credentialGroup: 'gradle-team-veracode'
 #       pipelinePolicy: 'My Custom Strict Policy'
-#       artifactPath: '$(Pipeline.Workspace)/gradle-build'
+#       artifactName: 'gradle-build'
+#       artifactPath: '$(Pipeline.Workspace)/gradle-input'
 #
 # Result:
 # - Uses custom sandbox name, credentials, policy
-# - Pre-built artifact path (skips autopackager)
+# - Pre-built artifact download (skips autopackager)
 # - Fully tailored to team's needs
 
 
