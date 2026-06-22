@@ -1,0 +1,282 @@
+# Example: Consuming Project's azure-pipelines.yml
+#
+# This example shows how a project consuming the reusable Veracode template
+# would structure their pipeline.
+#
+# Before using:
+# 1. Create a variable group "veracode-credentials" with:
+#    - VERACODE_API_ID (Secret)
+#    - VERACODE_API_KEY (Secret)
+#    - SRCCLR_API_TOKEN (Secret, optional for SCA)
+# 2. Clone/fork the pipelines repo into your Azure DevOps organization
+# 3. Update the repository name in the resources section
+
+trigger:
+  branches:
+    include:
+      - main
+      - feature/*
+      - release/*
+
+pr:
+  branches:
+    include:
+      - main
+
+# Reference the shared template repository
+resources:
+  repositories:
+    - repository: veracode-templates
+      type: git
+      name: YourOrganization/pipelines
+      ref: main
+
+# Project-specific variables (optional)
+variables:
+  - name: BuildConfiguration
+    value: 'Release'
+  - name: BuildPlatform
+    value: 'Any CPU'
+
+stages:
+  # =============================================================================
+  # Stage 1: Build - Your application compilation/packaging
+  # =============================================================================
+  - stage: Build
+    displayName: 'Build application'
+    jobs:
+      - job: CompileApp
+        displayName: 'Compile and package'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          # Example: Maven build
+          - script: |
+              echo "Building Java application with Maven..."
+              mvn clean package -DskipTests
+            displayName: 'Maven build'
+
+          # Example: Publish build artifacts (optional)
+          # If using pre-built artifacts mode, publish here
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)'
+              artifactName: 'compiled-app'
+            displayName: 'Publish build artifacts'
+            condition: succeeded()
+
+  # =============================================================================
+  # Stage 2: Veracode Scanning (Reusable Template)
+  # =============================================================================
+  - template: templates/veracode-scan.yml@veracode-templates
+    parameters:
+      # Application name in Veracode Platform
+      appName: 'MyAwesomeApp'
+
+      # Sandbox name for release branch scans
+      sandboxName: 'release-validation'
+
+      # Variable group containing API credentials
+      # (must exist in this project with proper permissions)
+      credentialGroup: 'veracode-credentials'
+
+      # Policy for PR pipeline scan gate
+      pipelinePolicy: 'Veracode Recommended Very High'
+
+      # Optional: Scoped rollout (remove once stable)
+      # allowedProjects:
+      #   - 'ProjectA'
+      #   - 'ProjectB'
+
+      # Optional: Use pre-built artifacts instead of autopackager
+      # Uncomment to skip Package stage and use your build output:
+      # artifactPath: '$(Pipeline.Workspace)/compiled-app'
+
+---
+
+# =============================================================================
+# ALTERNATIVE EXAMPLES
+# =============================================================================
+
+# Example 1: Minimal Configuration (Autopackager Mode)
+# ============================================================
+# stages:
+#   - template: templates/veracode-scan.yml@veracode-templates
+#     parameters:
+#       appName: 'SimpleApp'
+#
+# Result:
+# - Autopackager detects and packages all artifacts
+# - Uses default 'veracode-credentials' variable group
+# - Uses default 'Veracode Recommended Very High' policy
+# - Runs on all projects (no rollout control)
+
+
+# Example 2: Pre-Built Artifacts Mode
+# ============================================================
+# stages:
+#   - stage: Build
+#     jobs:
+#       - job: Compile
+#         steps:
+#           - script: |
+#               dotnet build -c Release
+#               mkdir -p dist
+#               cp -r bin/Release dist/
+#           - task: PublishPipelineArtifact@1
+#             inputs:
+#               targetPath: 'dist'
+#               artifactName: 'dotnet-build'
+#
+#   - template: templates/veracode-scan.yml@veracode-templates
+#     parameters:
+#       appName: 'DotNetApp'
+#       artifactPath: '$(Pipeline.Workspace)/dotnet-build'
+#
+# Result:
+# - Package stage skipped
+# - Pre-built artifacts validated and scanned directly
+# - Faster iteration (no re-packaging)
+
+
+# Example 3: Custom Credentials and Rollout Control
+# ============================================================
+# stages:
+#   - template: templates/veracode-scan.yml@veracode-templates
+#     parameters:
+#       appName: 'MyApp'
+#       credentialGroup: 'my-team-veracode-secrets'
+#       allowedProjects:
+#         - 'TeamA-Project'
+#         - 'TeamB-Project'
+#
+# Result:
+# - Uses team-specific credential group
+# - Only runs for TeamA and TeamB projects
+# - Other projects see: "Template skipped (rollout control)"
+# - Once stable, remove allowedProjects to enable org-wide
+
+
+# Example 4: Full Custom Configuration
+# ============================================================
+# stages:
+#   - stage: Build
+#     jobs:
+#       - job: Package
+#         steps:
+#           - script: |
+#               gradle build -x test
+#               cp build/libs/*.jar staging/
+#           - task: PublishPipelineArtifact@1
+#             inputs:
+#               targetPath: 'staging'
+#               artifactName: 'gradle-build'
+#
+#   - template: templates/veracode-scan.yml@veracode-templates
+#     parameters:
+#       appName: 'GradleApp'
+#       sandboxName: 'gradle-pre-release'
+#       credentialGroup: 'gradle-team-veracode'
+#       pipelinePolicy: 'My Custom Strict Policy'
+#       artifactPath: '$(Pipeline.Workspace)/gradle-build'
+#
+# Result:
+# - Uses custom sandbox name, credentials, policy
+# - Pre-built artifact path (skips autopackager)
+# - Fully tailored to team's needs
+
+
+# =============================================================================
+# WHAT HAPPENS IN EACH BRANCH
+# =============================================================================
+
+# On feature/my-feature (push):
+#   - Package/ValidateArtifacts: Packages code
+#   - SCA: Scans dependencies (async)
+#   - PipelineScan: Fast scan, no gate
+#   - Result: Developer gets quick feedback in ~5-10 minutes
+#   - Merge: No blocking
+
+# On PR to main:
+#   - Package/ValidateArtifacts: Packages code
+#   - SCA: Scans dependencies (async)
+#   - PipelineScanGate: Fast scan WITH policy gate
+#   - SandboxScanPR: Deep scan (async, non-blocking)
+#   - Result: Gate blocks if Very High/High violations found
+#   - Merge: Blocked until gate passes (Sandbox runs in background)
+
+# On release/v1.0 (push):
+#   - Package/ValidateArtifacts: Packages code
+#   - SCA: Scans dependencies (async)
+#   - SandboxScan: Full analysis in sandbox
+#   - Result: Comprehensive pre-production validation
+#   - Merge: No blocking (sandbox is async)
+
+# On main (after merge):
+#   - Package/ValidateArtifacts: Packages code
+#   - SCA: Scans dependencies (async)
+#   - PolicyScan: Full analysis, production certification
+#   - Result: Official security sign-off
+#   - Merge: N/A (already merged, this is post-merge)
+
+# =============================================================================
+# SETUP CHECKLIST
+# =============================================================================
+
+# Before using this pipeline, ensure:
+#
+# [ ] Variable group created:
+#     - Name: "veracode-credentials" (or custom via credentialGroup parameter)
+#     - Type: Secret variables
+#     - Contains: VERACODE_API_ID, VERACODE_API_KEY, SRCCLR_API_TOKEN (optional)
+#     - Access: Pipeline has permission
+#
+# [ ] Repository reference correct:
+#     - Update "YourOrganization/pipelines" to your org/repo
+#     - Ensure your pipeline has access to the template repo
+#
+# [ ] Branch policies configured (for PR gating):
+#     - Go to Repos → Branches → Select main
+#     - Add Branch policy → Build validation
+#     - Select this pipeline
+#     - Mark as Required (recommended)
+#
+# [ ] Veracode app profile exists or can be auto-created:
+#     - If appName doesn't exist, template creates it (createProfile: true)
+#     - Credentials must have permission to create profiles
+#
+# =============================================================================
+# TROUBLESHOOTING
+# =============================================================================
+
+# Q: "Credential not found" error
+# A: Check variable group permissions and name matches credentialGroup parameter
+
+# Q: No artifacts found
+# A: Verify build produces .jar, .war, or .zip files
+#    Or use artifactPath to specify pre-built artifacts
+
+# Q: PR gate not blocking
+# A: Ensure Branch policy is configured on main branch
+#    Check that PipelineScanGate stage is reaching the policy check
+
+# Q: Template skipped on my project
+# A: If allowedProjects parameter is used, your project must be in the list
+#    Remove allowedProjects parameter to enable for all projects
+
+# =============================================================================
+# NEXT STEPS
+# =============================================================================
+
+# 1. Copy this file to your consuming project as "azure-pipelines.yml"
+# 2. Update the repository name in resources section
+# 3. Update the appName parameter to your application name
+# 4. Create variable group with Veracode credentials
+# 5. Commit and push to feature branch
+# 6. Monitor pipeline execution
+# 7. Create PR to main and verify gate behavior
+# 8. Once stable, remove allowedProjects if used (enables org-wide)
+
+# For detailed guidance, see: docs/TEMPLATE-USAGE.md

@@ -1,0 +1,38 @@
+# Quick Start: Minimal Veracode Scanning Template Usage
+#
+# This is the simplest way to add Veracode scanning to your project.
+# Copy this file, update the organization name, and you're done.
+
+trigger:
+  branches:
+    include:
+      - main
+      - feature/*
+      - release/*
+
+pr:
+  branches:
+    include:
+      - main
+
+resources:
+  repositories:
+    - repository: veracode-templates
+      type: git
+      name: YourOrganization/pipelines
+
+stages:
+  # Your build stage (optional)
+  - stage: Build
+    displayName: 'Build'
+    jobs:
+      - job: Compile
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: echo "Your build steps here..."
+
+  # Add Veracode scanning (that's it!)
+  - template: templates/veracode-scan.yml@veracode-templates
+    parameters:
+      appName: 'MyApplication'
