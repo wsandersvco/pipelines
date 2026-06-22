@@ -17,11 +17,21 @@
 #   main       -> Policy Scan + SCA
 #
 # Usage - Autopackager:
+#   resources:
+#     repositories:
+#       - repository: veracode-templates
+#         type: git
+#         name: templates
 #   - template: templates/veracode-scan.yml@veracode-templates
 #     parameters:
 #       appName: 'MyApp'
 #
 # Usage - Pre-built artifact:
+#   resources:
+#     repositories:
+#       - repository: veracode-templates
+#         type: git
+#         name: templates
 #   - template: templates/veracode-scan.yml@veracode-templates
 #     parameters:
 #       appName: 'MyApp'
@@ -263,18 +273,10 @@ stages:
             displayName: 'Set Veracode app name'
 
   # =============================================================================
-  # Stage 2: SCA (all branches, parallel)
+  # Stage 2: SCA (all branches, parallel, independent)
   # =============================================================================
   - stage: SCA
     displayName: 'SCA scan'
-    dependsOn:
-      - Package
-      - DownloadArtifacts
-    condition: |
-      or(
-        succeeded('Package'),
-        succeeded('DownloadArtifacts')
-      )
     jobs:
       - job: SCAScan
         displayName: 'Veracode Agent-Based SCA'
@@ -282,7 +284,7 @@ stages:
           - checkout: self
           - script: |
               echo "Running Veracode Agent-Based SCA..."
-              curl -sSL https://download.sourceclear.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "SCA scan completed"
+              curl -sSL https://download.sourceclear.com/ci.sh | bash -s -- scan --recursive || echo "SCA scan completed"
             displayName: 'Veracode SCA scan'
             env:
               SRCCLR_API_TOKEN: $(SRCCLR_API_TOKEN)
