@@ -74,43 +74,48 @@ parameters:
     default: 'verascan'
     displayName: 'Download Path for Artifact'
 
-variables:
-  - group: ${{ parameters.credentialGroup }}
-
 stages:
   # =============================================================================
   # Rollout Control Validation: Skip if project not in allowedProjects list
   # =============================================================================
   - stage: RolloutCheck
     displayName: 'Rollout scope validation'
-    condition: ne(length(parameters.allowedProjects), 0)
     jobs:
       - job: ValidateProjectScope
         displayName: 'Validate project is in allowed scope'
         steps:
           - script: |
-              ALLOWED_PROJECTS="${{ join(parameters.allowedProjects, ' ') }}"
+              ALLOWED_PROJECTS_STR="${{ join(parameters.allowedProjects, ',') }}"
+
+              # If allowedProjects is empty, proceed (no rollout control)
+              if [ -z "$ALLOWED_PROJECTS_STR" ]; then
+                echo "##vso[task.setvariable variable=PROCEED_WITH_SCAN;isOutput=true]true"
+                echo "ℹ️  No rollout control - template enabled for all projects"
+                exit 0
+              fi
+
               CURRENT_PROJECT="$(System.TeamProject)"
-
               echo "Current project: $CURRENT_PROJECT"
-              echo "Allowed projects: $ALLOWED_PROJECTS"
+              echo "Allowed projects: $ALLOWED_PROJECTS_STR"
 
-              # Check if current project is in allowed list
+              # Check if current project is in allowed list (comma-separated)
               FOUND=0
-              for proj in $ALLOWED_PROJECTS; do
+              IFS=',' read -ra ALLOWED_ARRAY <<< "$ALLOWED_PROJECTS_STR"
+              for proj in "${ALLOWED_ARRAY[@]}"; do
+                proj=$(echo "$proj" | xargs)  # Trim whitespace
                 if [ "$proj" = "$CURRENT_PROJECT" ]; then
                   FOUND=1
                   echo "✓ Project $CURRENT_PROJECT is in allowed scope"
-                  break
+                  echo "##vso[task.setvariable variable=PROCEED_WITH_SCAN;isOutput=true]true"
+                  exit 0
                 fi
               done
 
-              if [ $FOUND -eq 0 ]; then
-                echo "ℹ️  Template skipped - project $CURRENT_PROJECT not in allowed rollout scope"
-                echo "##vso[task.logissue type=warning]Veracode template skipped (rollout control)"
-              fi
-
+              echo "ℹ️  Template skipped - project $CURRENT_PROJECT not in allowed rollout scope"
+              echo "##vso[task.logissue type=warning]Veracode template skipped (rollout control)"
+              echo "##vso[task.setvariable variable=PROCEED_WITH_SCAN;isOutput=true]false"
               exit 0
+            name: CheckScope
             displayName: 'Check project scope'
 
   # =============================================================================
@@ -118,7 +123,8 @@ stages:
   # =============================================================================
   - stage: Package
     displayName: 'Install and package'
-    condition: eq('${{ parameters.artifactName }}', '')
+    dependsOn: RolloutCheck
+    condition: and(succeeded('RolloutCheck'), eq('${{ parameters.artifactName }}', ''), eq(dependencies.RolloutCheck.outputs['ValidateProjectScope.CheckScope.PROCEED_WITH_SCAN'], 'true'))
     jobs:
       - job: PackageApp
         displayName: 'Veracode CLI autopackager'
@@ -213,7 +219,8 @@ stages:
   # =============================================================================
   - stage: DownloadArtifacts
     displayName: 'Download published artifact'
-    condition: ne('${{ parameters.artifactName }}', '')
+    dependsOn: RolloutCheck
+    condition: and(succeeded('RolloutCheck'), ne('${{ parameters.artifactName }}', ''), eq(dependencies.RolloutCheck.outputs['ValidateProjectScope.CheckScope.PROCEED_WITH_SCAN'], 'true'))
     jobs:
       - job: DownloadArtifactJob
         displayName: 'Download and list artifact'
@@ -295,6 +302,7 @@ stages:
   - stage: PipelineScan
     displayName: 'Pipeline Scan (feature)'
     dependsOn:
+      - RolloutCheck
       - Package
       - DownloadArtifacts
     condition: |
@@ -303,6 +311,7 @@ stages:
           succeeded('Package'),
           succeeded('DownloadArtifacts')
         ),
+        eq(dependencies.RolloutCheck.outputs['ValidateProjectScope.CheckScope.PROCEED_WITH_SCAN'], 'true'),
         ne(variables['Build.Reason'], 'PullRequest'),
         startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/'),
         ne(variables['Build.SourceBranch'], 'refs/heads/main')
@@ -398,6 +407,7 @@ stages:
   - stage: PipelineScanGate
     displayName: 'Pipeline Scan (PR gate)'
     dependsOn:
+      - RolloutCheck
       - Package
       - DownloadArtifacts
     condition: |
@@ -406,6 +416,7 @@ stages:
           succeeded('Package'),
           succeeded('DownloadArtifacts')
         ),
+        eq(dependencies.RolloutCheck.outputs['ValidateProjectScope.CheckScope.PROCEED_WITH_SCAN'], 'true'),
         eq(variables['Build.Reason'], 'PullRequest')
       )
     jobs:
@@ -510,6 +521,7 @@ stages:
   - stage: SandboxScan
     displayName: 'Sandbox Scan (release)'
     dependsOn:
+      - RolloutCheck
       - Package
       - DownloadArtifacts
     condition: |
@@ -518,6 +530,7 @@ stages:
           succeeded('Package'),
           succeeded('DownloadArtifacts')
         ),
+        eq(dependencies.RolloutCheck.outputs['ValidateProjectScope.CheckScope.PROCEED_WITH_SCAN'], 'true'),
         startsWith(variables['Build.SourceBranch'], 'refs/heads/release/')
       )
     jobs:
@@ -556,7 +569,10 @@ stages:
               veracodeAppProfile: '$(APP_NAME)'
               version: 'Release $(Build.BuildNumber)'
               optargs: '-deleteincompletescan 1'
-              filepath: ${{ if eq(parameters.artifactName, '') then 'verascan' else parameters.artifactPath }}
+              ${{ if eq(parameters.artifactName, '') }}:
+                filepath: 'verascan'
+              ${{ else }}:
+                filepath: parameters.artifactPath
               createProfile: true
               createSandbox: true
               sandboxName: ${{ parameters.sandboxName }}
@@ -570,10 +586,12 @@ stages:
   - stage: SandboxScanPR
     displayName: 'Sandbox Scan (PR async)'
     dependsOn:
+      - RolloutCheck
       - PipelineScanGate
     condition: |
       and(
         succeededOrFailed('PipelineScanGate'),
+        eq(dependencies.RolloutCheck.outputs['ValidateProjectScope.CheckScope.PROCEED_WITH_SCAN'], 'true'),
         eq(variables['Build.Reason'], 'PullRequest')
       )
     jobs:
@@ -617,7 +635,10 @@ stages:
               veracodeAppProfile: '$(APP_NAME)'
               version: 'PR $(Build.BuildNumber)'
               optargs: '-deleteincompletescan 1'
-              filepath: ${{ if eq(parameters.artifactPath, '') then 'verascan' else parameters.artifactPath }}
+              ${{ if eq(parameters.artifactName, '') }}:
+                filepath: 'verascan'
+              ${{ else }}:
+                filepath: parameters.artifactPath
               createProfile: true
               createSandbox: true
               sandboxName: '${{ parameters.sandboxName }}-pr-$(Build.PullRequest.PullRequestNumber)'
@@ -631,6 +652,7 @@ stages:
   - stage: PolicyScan
     displayName: 'Policy Scan (production)'
     dependsOn:
+      - RolloutCheck
       - Package
       - DownloadArtifacts
     condition: |
@@ -639,6 +661,7 @@ stages:
           succeeded('Package'),
           succeeded('DownloadArtifacts')
         ),
+        eq(dependencies.RolloutCheck.outputs['ValidateProjectScope.CheckScope.PROCEED_WITH_SCAN'], 'true'),
         eq(variables['Build.SourceBranch'], 'refs/heads/main'),
         ne(variables['Build.Reason'], 'PullRequest')
       )
@@ -670,7 +693,10 @@ stages:
               veracodeAppProfile: '$(APP_NAME)'
               version: 'Build $(Build.BuildNumber)'
               optargs: '-deleteincompletescan 1'
-              filepath: ${{ if eq(parameters.artifactPath, '') then 'verascan' else parameters.artifactPath }}
+              ${{ if eq(parameters.artifactName, '') }}:
+                filepath: 'verascan'
+              ${{ else }}:
+                filepath: parameters.artifactPath
               createProfile: true
               importResults: true
               maximumWaitTime: '120'
