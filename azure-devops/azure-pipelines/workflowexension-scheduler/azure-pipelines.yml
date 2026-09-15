@@ -27,6 +27,8 @@
 #
 # SCA runs on all branches.
 
+# https://learn.microsoft.com/en-us/azure/devops/pipelines/process/scheduled-triggers?view=azure-devops&pivots=pipelines-yaml
+# Leverage Build.CronSchedule.DisplayName variable for different display name to run stages on conditions based on which schedule is running.
 schedules:
 - cron: "0 0 * * * "
   displayName: "Daily midnight scan"
